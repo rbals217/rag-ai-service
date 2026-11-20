@@ -1,0 +1,5 @@
+# 1차시
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
