@@ -68,7 +68,15 @@ async def index_concert(req: ConcertIndexRequest, request: Request):
             req.concert_id,
             req.title,
             req.price,
-            req.location
+            req.location,
+            req.notice,
+            req.casting,
+            req.detail,
+            req.price_info,
+            req.guide,
+            req.refund,
+            req.story,
+            req.mood
         )
     except Exception as e:
         log.exception("공연 색인 실패")

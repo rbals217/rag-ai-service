@@ -16,8 +16,16 @@ class ConcertIndexRequest(CamelModel):
     concert_id: int = Field(gt=0)
     title: str = Field(min_length=1, max_length=200)
     price: int = Field(gt=0)
-    location: str = Field(min_length=1, max_length=200)
+    location: str = Field( min_length=1, max_length=200)
 
+    notice : str | None= None
+    casting : str | None= None
+    detail : str | None= None
+    price_info : str | None = None
+    guide : str | None = None
+    refund : str | None = None
+    story : str | None = None
+    mood : str | None = None        # None은 모든 값 다 받겠다는 소리
 
 # 공연 색인 결과
 class ConcertIndexResponse(CamelModel):

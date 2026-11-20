@@ -26,5 +26,5 @@ class Settings(BaseSettings):
     # MongoDB Atlas (atlas 엔진에서만 사용)
     mongodb_uri: str = ""
     mongodb_db: str = "rag"
-    mongodb_collection: str = "board_chunks"
-    atlas_index_name: str = "board_vector_index"
+    mongodb_collection: str = "concert_chunks"
+    atlas_index_name: str = "concert_vector_index"
