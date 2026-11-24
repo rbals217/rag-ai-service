@@ -305,7 +305,11 @@ class StubEngine:
                 continue
 
             for chunk in chunks:
-                score = len(q & bigrams(chunk.text)) / len(q)
+                # 공연 제목과 정보 항목 헤더를 제외한 실제 본문 추출
+                content = body_of(chunk.text)
+
+                # 실제 본문만 사용하여 검색 점수 계산
+                score = len(q & bigrams(content)) / len(q)
 
                 if score < self.min_score:
                     continue
@@ -361,7 +365,7 @@ class AtlasEngine:
         from langchain_mongodb import MongoDBAtlasVectorSearch
         from langchain_openai import ChatOpenAI, OpenAIEmbeddings
         from pymongo import MongoClient
-
+        import certifi
         if not settings.openai_api_key or not settings.mongodb_uri:
             raise RuntimeError(
                 "RAG_ENGINE=atlas에는 "
@@ -374,9 +378,9 @@ class AtlasEngine:
         # MongoDB 연결
         self.client = MongoClient(
             settings.mongodb_uri,
-            serverSelectionTimeoutMS=5000
+            tlsCAFile=certifi.where(),
+            serverSelectionTimeoutMS=10000
         )
-
         # Settings에 정의된 실제 변수명 사용
         self.collection = self.client[
             settings.mongodb_db

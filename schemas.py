@@ -48,13 +48,11 @@ class QueryRequest(CamelModel):
     )
     top_k: int = Field(default=4, ge=1, le=10)
 
-
 # 검색 출처
 class Source(CamelModel):
     concert_id: int
     title: str
-    price: int
-    location: str
+    field_name: str
     snippet: str
     score: float
 
