@@ -1,44 +1,231 @@
+import re
+from dataclasses import dataclass
 
-# 임시 RAG 엔진
-# MongoDB Atlas 연결 전까지 공연 데이터를 메모리에 저장
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from settings import Settings
+
+
+# ───────────────────────── 청크 데이터 ─────────────────────────
+
+@dataclass
+class Chunk:
+    concert_id: int
+    title: str
+    field_name: str
+    text: str
+    score: float = 0.0
+
+
+# ───────────────────────── 공통 도우미 ─────────────────────────
+
+def make_splitter(settings: Settings) -> RecursiveCharacterTextSplitter:
+    # 자연스러운 문단과 문장 경계를 우선하여 청크 분할
+    return RecursiveCharacterTextSplitter(
+        chunk_size=settings.chunk_size,
+        chunk_overlap=settings.chunk_overlap,
+        separators=["\n\n", "\n", ". ", " ", ""],
+    )
+
+
+def chunk_texts(
+    splitter: RecursiveCharacterTextSplitter,
+    title: str,
+    field_name: str,
+    content: str
+) -> list[str]:
+    """공연의 특정 항목 하나를 독립적으로 분할한다."""
+
+    if content is None:
+        return []
+
+    content = str(content).strip()
+
+    # 값이 비어 있는 항목은 청크를 만들지 않는다.
+    if not content:
+        return []
+
+    pieces = splitter.split_text(content)
+
+    return [
+        (
+            f"공연 제목: {title}\n"
+            f"정보 항목: {field_name}\n"
+            f"{piece}"
+        ).strip()
+        for piece in pieces
+    ]
+
+
+def make_concert_chunks(
+    splitter: RecursiveCharacterTextSplitter,
+    title,
+    price,
+    location,
+    notice,
+    casting,
+    detail,
+    price_info,
+    guide,
+    refund,
+    story,
+    mood
+) -> list[tuple[str, str]]:
+    """11개 공연 항목을 각각 독립적으로 청크화한다."""
+
+    fields = {
+        "공연 제목": title,
+        "가격": price,
+        "장소": location,
+        "공지사항": notice,
+        "출연진": casting,
+        "공연 상세정보": detail,
+        "가격 정보": price_info,
+        "관람 안내": guide,
+        "환불 정보": refund,
+        "공연 스토리": story,
+        "공연 분위기": mood,
+    }
+
+    all_chunks = []
+
+    for field_name, content in fields.items():
+        field_chunks = chunk_texts(
+            splitter,
+            title,
+            field_name,
+            content
+        )
+
+        # 항목명과 청크 본문을 함께 보관한다.
+        all_chunks.extend(
+            (field_name, chunk_text)
+            for chunk_text in field_chunks
+        )
+
+    return all_chunks
+
+
+def body_of(text: str) -> str:
+    """청크에서 공연 제목과 정보 항목 표시를 제외한 본문을 반환한다."""
+
+    lines = text.split("\n")
+
+    body_lines = [
+        line for line in lines
+        if not line.startswith("공연 제목:")
+        and not line.startswith("정보 항목:")
+    ]
+
+    return "\n".join(body_lines).strip()
+
+
+def format_context(chunks: list[Chunk]) -> str:
+    """검색된 공연 청크를 LLM에 전달할 근거 목록으로 변환한다."""
+
+    return "\n\n".join(
+        f"[#공연ID:{chunk.concert_id}] "
+        f"공연 제목: {chunk.title}\n"
+        f"정보 항목: {chunk.field_name}\n"
+        f"{body_of(chunk.text)}"
+        for chunk in chunks
+    )
+
+
+def bigrams(text: str) -> set[str]:
+    """문자열을 두 글자 단위로 나눈다."""
+
+    cleaned = re.sub(r"[^0-9a-zA-Z가-힣]", "", text.lower())
+
+    if len(cleaned) > 1:
+        return {
+            cleaned[i:i + 2]
+            for i in range(len(cleaned) - 1)
+        }
+
+    return {cleaned} if cleaned else set()
+
+
+# ───────────────────────── 질문 프롬프트 ─────────────────────────
+
+_STOP = [
+    "하나요", "인가요", "있나요", "되나요", "할까요",
+    "어때", "알려줘", "알려 줘", "궁금해",
+    "뭐야", "언제", "어디", "어떻게", "무엇", "?", "？"
+]
+
+
+ANSWER_PROMPT = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        "너는 공연 정보를 안내하는 AI 도우미다. "
+        "아래 [공연 정보]에 있는 내용만 근거로 한국어로 답한다.\n"
+        "- 공연 정보에 없는 내용은 추측하지 않는다.\n"
+        "- 찾을 수 없는 정보는 '해당 공연 정보에서 찾을 수 없습니다'라고 답한다.\n"
+        "- 근거로 사용한 문장 끝에는 [#공연ID:번호]를 붙인다.\n"
+        "- 3문장 이내로 답한다."
+    ),
+    (
+        "human",
+        "[공연 정보]\n{context}\n\n[질문]\n{question}"
+    ),
+])
+
+
+REWRITE_PROMPT = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        "사용자 질문을 공연 정보 검색에 적합한 짧은 검색 문장으로 바꾼다. "
+        "공연명, 가격, 장소, 출연진 등 핵심 명사와 키워드를 남기고 "
+        "한 줄로만 출력한다."
+    ),
+    ("human", "{question}"),
+])
+
+
+ABSTAIN_MESSAGE = (
+    "관련 공연 정보를 찾지 못했습니다. "
+    "공연명이나 질문을 조금 더 구체적으로 입력해 주세요."
+)
+
+
+# ───────────────────────── Stub 엔진 ─────────────────────────
 
 class StubEngine:
+    """메모리에 공연 청크를 저장하고 2-gram으로 검색하는 엔진."""
+
     name = "stub"
-    min_score = 0.0
 
-    def __init__(self, settings):
-        self.store = {}
+    def __init__(self, settings: Settings):
+        self.splitter = make_splitter(settings)
+        self.min_score = settings.stub_min_score
 
-        # 청크 분할 설정
-        self.chunk_size = settings.chunk_size
-        self.chunk_overlap = settings.chunk_overlap
+        # 공연 ID별 원본 공연 정보
+        self.concert_data = {}
 
-    # 청크 분할
-    def split_text(self, text):
-        chunks = []
-
-        text = text.strip()
-
-        if not text:
-            return chunks
-
-        start = 0
-
-        while start < len(text):
-            end = start + self.chunk_size
-
-            chunk = text[start:end].strip()
-
-            if chunk:
-                chunks.append(chunk)
-
-            start += self.chunk_size -self.chunk_overlap
-
-        return chunks
+        # 공연 ID별 청크 목록
+        self.store: dict[int, list[Chunk]] = {}
 
     # 공연 색인
-    def index_concert(self, concert_id, title, price, location,notice,casting,detail,price_info,guide,refund,story,mood):
-        self.store[concert_id] = {
+    def index_concert(
+        self,
+        concert_id,
+        title,
+        price,
+        location,
+        notice,
+        casting,
+        detail,
+        price_info,
+        guide,
+        refund,
+        story,
+        mood
+    ):
+        # 공연 원본 정보 저장
+        self.concert_data[concert_id] = {
             "type": "CONCERT",
             "concert_id": concert_id,
             "title": title,
@@ -50,50 +237,334 @@ class StubEngine:
             "price_info": price_info,
             "guide": guide,
             "refund": refund,
-            "story":story,
+            "story": story,
             "mood": mood,
-
         }
-        # ② 공연 정보를 하나의 텍스트로 합치기 (추가)
-        concert_text = f"""
-        공연 제목: {title}
-        가격: {price}
-        장소: {location}
-        공지사항: {notice}
-        출연진: {casting}
-        공연 상세정보: {detail}
-        가격 정보: {price_info}
-        관람 안내: {guide}
-        환불 정보: {refund}
-        공연 스토리: {story}
-        공연 분위기: {mood}
-        """
-         # 텍스트 청크 분할
-        chunks = self.split_text(concert_text)
-        # 청크 분할 결과 확인
-        for i, chunk in enumerate(chunks):
+
+        # 11개 항목을 각각 독립적으로 청크화
+        field_chunks = make_concert_chunks(
+            self.splitter,
+            title,
+            price,
+            location,
+            notice,
+            casting,
+            detail,
+            price_info,
+            guide,
+            refund,
+            story,
+            mood
+        )
+
+        # 공연 ID별 청크 저장
+        self.store[concert_id] = [
+            Chunk(
+                concert_id=concert_id,
+                title=title,
+                field_name=field_name,
+                text=text
+            )
+            for field_name, text in field_chunks
+        ]
+
+        # 청크 분할 결과 출력
+        for i, chunk in enumerate(self.store[concert_id]):
             print(f"공연 ID: {concert_id}")
             print(f"청크 번호: {i + 1}")
-            print(f"청크 길이: {len(chunk)}")
-            print(f"청크 내용: {chunk}")
+            print(f"정보 항목: {chunk.field_name}")
+            print(f"청크 길이: {len(chunk.text)}")
+            print(f"청크 내용: {chunk.text}")
             print("-" * 50)
 
-        # 기존 공연 데이터에 청크 추가
-        self.store[concert_id]["chunks"] = chunks
-
-        # 실제 생성된 청크 개수 반환
-        return len(chunks)
-
+        return len(field_chunks)
 
     # 공연 삭제
     def delete_concert(self, concert_id):
-        if concert_id in self.store:
-            self.store.pop(concert_id)
-            return 1
+        existed = concert_id in self.store
 
-        return 0
+        self.store.pop(concert_id, None)
+        self.concert_data.pop(concert_id, None)
+
+        return 1 if existed else 0
+
+    # 공연 검색
+    def search(self, query, concert_ids, k):
+        q = bigrams(query)
+
+        if not q:
+            return []
+
+        allowed = set(concert_ids)
+        scored = []
+
+        for concert_id, chunks in self.store.items():
+
+            # 검색 허용 목록에 있는 공연만 검색
+            if concert_id not in allowed:
+                continue
+
+            for chunk in chunks:
+                score = len(q & bigrams(chunk.text)) / len(q)
+
+                if score < self.min_score:
+                    continue
+
+                scored.append(
+                    Chunk(
+                        concert_id=chunk.concert_id,
+                        title=chunk.title,
+                        field_name=chunk.field_name,
+                        text=chunk.text,
+                        score=round(score, 3)
+                    )
+                )
+
+        scored.sort(
+            key=lambda chunk: chunk.score,
+            reverse=True
+        )
+
+        return scored[:k]
+
+    # 검색 결과를 이용한 답변
+    def generate(self, question, chunks):
+        if not chunks:
+            return ABSTAIN_MESSAGE
+
+        best = chunks[0]
+        body = body_of(best.text).replace("\n", " ")[:150]
+
+        return (
+            f"'{best.title}' 공연의 {best.field_name} 정보에 따르면: "
+            f"{body} [#공연ID:{best.concert_id}]"
+        )
+
+    # 질문 재작성
+    def rewrite(self, question):
+        query = question
+
+        for word in _STOP:
+            query = query.replace(word, " ")
+
+        return " ".join(query.split()) or question
 
 
-# 엔진 생성 함수
-def create_engine(settings):
-    return StubEngine(settings)
+# ───────────────────────── Atlas 엔진 ─────────────────────────
+
+class AtlasEngine:
+    """OpenAI 임베딩과 MongoDB Atlas Vector Search를 사용하는 엔진."""
+
+    name = "atlas"
+
+    def __init__(self, settings: Settings):
+        from langchain_mongodb import MongoDBAtlasVectorSearch
+        from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+        from pymongo import MongoClient
+
+        if not settings.openai_api_key or not settings.mongodb_uri:
+            raise RuntimeError(
+                "RAG_ENGINE=atlas에는 "
+                "OPENAI_API_KEY와 MONGODB_URI가 필요합니다."
+            )
+
+        self.splitter = make_splitter(settings)
+        self.min_score = settings.min_score
+
+        # MongoDB 연결
+        self.client = MongoClient(
+            settings.mongodb_uri,
+            serverSelectionTimeoutMS=5000
+        )
+
+        # Settings에 정의된 실제 변수명 사용
+        self.collection = self.client[
+            settings.mongodb_db
+        ][
+            settings.mongodb_collection
+        ]
+
+        # OpenAI 임베딩 객체 생성
+        embeddings = OpenAIEmbeddings(
+            model=settings.openai_embedding_model,
+            dimensions=settings.embedding_dimensions,
+            api_key=settings.openai_api_key
+        )
+
+        # MongoDB Atlas Vector Search 연결
+        self.store = MongoDBAtlasVectorSearch(
+            collection=self.collection,
+            embedding=embeddings,
+            index_name=settings.atlas_index_name,
+            text_key="text",
+            embedding_key="embedding",
+            relevance_score_fn="cosine"
+        )
+
+        # ChatOpenAI 모델 생성
+        llm = ChatOpenAI(
+            model=settings.openai_chat_model,
+            temperature=0,
+            api_key=settings.openai_api_key
+        )
+
+        # 질문과 검색 자료를 이용한 답변 생성 체인
+        self.answer_chain = (
+            ANSWER_PROMPT
+            | llm
+            | StrOutputParser()
+        )
+
+        # 사용자 질문 재작성 체인
+        self.rewrite_chain = (
+            REWRITE_PROMPT
+            | llm
+            | StrOutputParser()
+        )
+
+    # 공연 색인
+    def index_concert(
+        self,
+        concert_id,
+        title,
+        price,
+        location,
+        notice,
+        casting,
+        detail,
+        price_info,
+        guide,
+        refund,
+        story,
+        mood
+    ):
+        # 11개 항목을 각각 독립적으로 청크화
+        field_chunks = make_concert_chunks(
+            self.splitter,
+            title,
+            price,
+            location,
+            notice,
+            casting,
+            detail,
+            price_info,
+            guide,
+            refund,
+            story,
+            mood
+        )
+
+        # 기존 공연을 다시 색인하는 경우 이전 청크 삭제
+        self.collection.delete_many({
+            "metadata.concert_id": concert_id
+        })
+
+        # 각 청크에 공연 ID, 제목, 항목 이름을 메타데이터로 저장
+        texts = [text for _, text in field_chunks]
+
+        metadatas = [
+            {
+                "type": "CONCERT",
+                "concert_id": concert_id,
+                "title": title,
+                "field_name": field_name
+            }
+            for field_name, _ in field_chunks
+        ]
+
+        # Atlas에 청크와 임베딩 저장
+        if texts:
+            self.store.add_texts(
+                texts=texts,
+                metadatas=metadatas
+            )
+
+        return len(texts)
+
+    # 공연 삭제
+    def delete_concert(self, concert_id):
+        result = self.collection.delete_many({
+            "metadata.concert_id": concert_id
+        })
+
+        return result.deleted_count
+
+    # 공연 검색
+    def search(self, query, concert_ids, k):
+        if not concert_ids:
+            return []
+
+        # 우선 유사도가 높은 청크를 넉넉하게 검색한 후
+        # 허용된 공연 ID에 해당하는 결과만 남긴다.
+        documents = self.store.similarity_search_with_score(
+            query,
+            k=max(k * 10, 50)
+        )
+
+        allowed = set(concert_ids)
+        scored = []
+
+        for document, score in documents:
+            metadata = document.metadata or {}
+            concert_id = metadata.get("concert_id")
+
+            if concert_id not in allowed:
+                continue
+
+            score = float(score)
+
+            if score < self.min_score:
+                continue
+
+            scored.append(
+                Chunk(
+                    concert_id=concert_id,
+                    title=metadata.get("title", ""),
+                    field_name=metadata.get("field_name", ""),
+                    text=document.page_content,
+                    score=round(score, 3)
+                )
+            )
+
+        scored.sort(
+            key=lambda chunk: chunk.score,
+            reverse=True
+        )
+
+        return scored[:k]
+
+    # 검색 결과를 이용한 답변 생성
+    def generate(self, question, chunks):
+        if not chunks:
+            return ABSTAIN_MESSAGE
+
+        context = format_context(chunks)
+
+        return self.answer_chain.invoke({
+            "context": context,
+            "question": question
+        })
+
+    # 질문 재작성
+    def rewrite(self, question):
+        return self.rewrite_chain.invoke({
+            "question": question
+        })
+
+    # MongoDB 연결 종료
+    def close(self):
+        self.client.close()
+
+
+# ───────────────────────── 엔진 생성 ─────────────────────────
+
+def create_engine(settings: Settings):
+    if settings.rag_engine == "stub":
+        return StubEngine(settings)
+
+    if settings.rag_engine == "atlas":
+        return AtlasEngine(settings)
+
+    raise ValueError(
+        f"지원하지 않는 RAG_ENGINE입니다: {settings.rag_engine}"
+    )
