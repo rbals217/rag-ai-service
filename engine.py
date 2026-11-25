@@ -1,4 +1,5 @@
 import re
+import uuid
 from dataclasses import dataclass
 
 from langchain_core.output_parsers import StrOutputParser
@@ -34,7 +35,7 @@ def chunk_texts(
     splitter: RecursiveCharacterTextSplitter,
     title: str,
     field_name: str,
-    content: str
+    content: object
 ) -> list[str]:
     """공연의 특정 항목 하나를 독립적으로 분할한다."""
 
@@ -290,26 +291,31 @@ class StubEngine:
 
     # 공연 검색
     def search(self, query, concert_ids, k):
-        q = bigrams(query)
 
-        if not q:
+        # 검색 허용 공연 ID가 없으면 검색하지 않는다.
+        if not concert_ids:
             return []
 
+        query_bigrams = bigrams(query)
         allowed = set(concert_ids)
         scored = []
 
         for concert_id, chunks in self.store.items():
 
-            # 검색 허용 목록에 있는 공연만 검색
+            # 허용된 공연 ID가 아니면 제외한다.
             if concert_id not in allowed:
                 continue
 
             for chunk in chunks:
-                # 공연 제목과 정보 항목 헤더를 제외한 실제 본문 추출
-                content = body_of(chunk.text)
+                chunk_bigrams = bigrams(chunk.text)
 
-                # 실제 본문만 사용하여 검색 점수 계산
-                score = len(q & bigrams(content)) / len(q)
+                if not query_bigrams or not chunk_bigrams:
+                    continue
+
+                score = (
+                    len(query_bigrams & chunk_bigrams)
+                    / len(query_bigrams | chunk_bigrams)
+                )
 
                 if score < self.min_score:
                     continue
@@ -366,6 +372,7 @@ class AtlasEngine:
         from langchain_openai import ChatOpenAI, OpenAIEmbeddings
         from pymongo import MongoClient
         import certifi
+
         if not settings.openai_api_key or not settings.mongodb_uri:
             raise RuntimeError(
                 "RAG_ENGINE=atlas에는 "
@@ -374,6 +381,7 @@ class AtlasEngine:
 
         self.splitter = make_splitter(settings)
         self.min_score = settings.min_score
+        self.settings = settings
 
         # MongoDB 연결
         self.client = MongoClient(
@@ -381,6 +389,7 @@ class AtlasEngine:
             tlsCAFile=certifi.where(),
             serverSelectionTimeoutMS=10000
         )
+
         # Settings에 정의된 실제 변수명 사용
         self.collection = self.client[
             settings.mongodb_db
@@ -458,52 +467,66 @@ class AtlasEngine:
             mood
         )
 
-        # 기존 공연을 다시 색인하는 경우 이전 청크 삭제
-        self.collection.delete_many({
-            "metadata.concert_id": concert_id
-        })
+        # 청크가 없다면 기존 색인 데이터를 삭제하지 않는다.
+        if not field_chunks:
+            return 0
+
+        # 재색인 버전을 구분하기 위한 고유 ID 생성
+        index_version = str(uuid.uuid4())
+
+        texts = [
+            chunk_text
+            for _, chunk_text in field_chunks
+        ]
 
         # 각 청크에 공연 ID, 제목, 항목 이름을 메타데이터로 저장
-        texts = [text for _, text in field_chunks]
-
         metadatas = [
             {
                 "type": "CONCERT",
                 "concert_id": concert_id,
                 "title": title,
-                "field_name": field_name
+                "field_name": field_name,
+                "_index_version": index_version,
             }
             for field_name, _ in field_chunks
         ]
 
-        # Atlas에 청크와 임베딩 저장
-        if texts:
-            self.store.add_texts(
-                texts=texts,
-                metadatas=metadatas
-            )
+        # 새 청크와 임베딩을 먼저 저장한다.
+        self.store.add_texts(
+            texts=texts,
+            metadatas=metadatas
+        )
+
+        # 새 청크 저장이 성공한 다음 기존 청크를 삭제한다.
+        self.collection.delete_many({
+            "concert_id": concert_id,
+            "_index_version": {"$ne": index_version}
+        })
 
         return len(texts)
 
     # 공연 삭제
     def delete_concert(self, concert_id):
         result = self.collection.delete_many({
-            "metadata.concert_id": concert_id
+            "concert_id": concert_id
         })
 
         return result.deleted_count
 
     # 공연 검색
     def search(self, query, concert_ids, k):
+
+        # 검색 허용 공연 ID가 없으면 검색하지 않는다.
         if not concert_ids:
             return []
 
-        # 우선 유사도가 높은 청크를 넉넉하게 검색한 후
-        # 허용된 공연 ID에 해당하는 결과만 남긴다.
+        # 우선 유사도가 높은 청크를 넉넉하게 검색한다.
         documents = self.store.similarity_search_with_score(
             query,
             k=max(k * 10, 50)
         )
+
+        print("Atlas 검색 결과 개수:", len(documents))
 
         allowed = set(concert_ids)
         scored = []
@@ -512,10 +535,17 @@ class AtlasEngine:
             metadata = document.metadata or {}
             concert_id = metadata.get("concert_id")
 
+            # 허용된 공연 ID에 해당하지 않으면 제외한다.
             if concert_id not in allowed:
                 continue
 
             score = float(score)
+
+            print(
+                "검색된 공연 ID:", concert_id,
+                "| 점수:", score,
+                "| 공연명:", metadata.get("title")
+            )
 
             if score < self.min_score:
                 continue
@@ -558,6 +588,72 @@ class AtlasEngine:
     # MongoDB 연결 종료
     def close(self):
         self.client.close()
+
+    # Vector Search 인덱스 생성
+    def create_vector_index(self):
+        from pymongo.operations import SearchIndexModel
+
+        index_name = self.settings.atlas_index_name
+
+        # 기존 인덱스 확인
+        indexes = list(self.collection.list_search_indexes())
+
+        for index in indexes:
+            if index.get("name") == index_name:
+                return {
+                    "index_name": index_name,
+                    "created": False,
+                    "message": "이미 존재하는 인덱스입니다."
+                }
+
+        # Vector Search 인덱스 정의
+        index_model = SearchIndexModel(
+            definition={
+                "fields": [
+                    {
+                        "type": "vector",
+                        "path": "embedding",
+                        "numDimensions": self.settings.embedding_dimensions,
+                        "similarity": "cosine"
+                    }
+                ]
+            },
+            name=index_name,
+            type="vectorSearch"
+        )
+
+        # MongoDB Atlas에 인덱스 생성 요청
+        created_name = self.collection.create_search_index(
+            model=index_model
+        )
+
+        return {
+            "index_name": created_name,
+            "created": True,
+            "message": "Vector Search 인덱스 생성 요청이 완료되었습니다."
+        }
+
+    # Vector Search 인덱스 상태 확인
+    def get_vector_index_status(self):
+        index_name = self.settings.atlas_index_name
+
+        indexes = list(self.collection.list_search_indexes())
+
+        for index in indexes:
+            if index.get("name") == index_name:
+                return {
+                    "index_name": index_name,
+                    "exists": True,
+                    "status": index.get("status", "UNKNOWN"),
+                    "queryable": index.get("queryable", False)
+                }
+
+        return {
+            "index_name": index_name,
+            "exists": False,
+            "status": "NOT_FOUND",
+            "queryable": False
+        }
 
 
 # ───────────────────────── 엔진 생성 ─────────────────────────

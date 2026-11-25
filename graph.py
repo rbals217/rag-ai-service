@@ -27,11 +27,13 @@ def build_graph(engine, settings: Settings):
 
     def retrieve(state: RagState) -> dict:
         concert_ids = state.get("concert_ids") or []
-        chunks = (
-            engine.search(state["query"], concert_ids, state.get("top_k", 4))
-            if concert_ids
-            else []
+
+        chunks = engine.search(
+            state["query"],
+            concert_ids,
+            state.get("top_k", 4)
         )
+
         return {"chunks": chunks, "trace": ["retrieve"]}
 
     def grade(state: RagState) -> dict:

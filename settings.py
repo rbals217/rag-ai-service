@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     stub_min_score: float = 0.3  # 2-gram 겹침 비율 (0~1)
     min_score: float = 0.78  # Atlas 코사인 점수 (0~1 로 변환된 값)
 
+
     # OpenAI (atlas 엔진에서만 사용)
     openai_api_key: str = ""
     openai_embedding_model: str = "text-embedding-3-small"

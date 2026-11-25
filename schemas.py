@@ -15,8 +15,8 @@ class CamelModel(BaseModel):
 class ConcertIndexRequest(CamelModel):
     concert_id: int = Field(gt=0)
     title: str = Field(min_length=1, max_length=200)
-    price: int = Field(gt=0)
-    location: str = Field( min_length=1, max_length=200)
+    price: int | None = Field(default=None, ge=0)
+    location: str | None = Field(default=None, max_length=200)
 
     notice : str | None= None
     casting : str | None= None

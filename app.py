@@ -1,7 +1,12 @@
 from contextlib import asynccontextmanager
 import logging
 import secrets
-
+# 프로그램의 메인 역할을 함
+# 1. 서버 초기화: 설정, RAG엔진, LangGraph를 최초 생성
+# 2. 서비스 인증: Spring Boot가 전달하는 서비스 트큰 검증
+# 3. 게시글 색인: /index로 전달받은 게시글 저장
+# 4. 게시글 삭제: /index/{board_id}로 색인 데이터 삭제
+# 5. AI 질의: /query로 전달받은 질문 처리
 from fastapi import FastAPI, Depends, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 
@@ -75,7 +80,35 @@ def verify_token(
 def health():
     return {"status": "OK"}
 
+# Vector Search 인덱스 상태 확인
+@app.get(
+    "/index/vector/status",
+    dependencies=[Depends(verify_token)]
+)
+async def vector_index_status(request: Request):
 
+    engine = request.app.state.engine
+
+    if engine.name != "atlas":
+        raise HTTPException(
+            status_code=400,
+            detail="Vector Search 상태 확인은 Atlas 엔진에서만 가능합니다."
+        )
+
+    try:
+        result = await run_in_threadpool(
+            engine.get_vector_index_status
+        )
+
+        return result
+
+    except Exception as e:
+        log.exception("Vector Search 인덱스 상태 확인 실패")
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"Vector Search 상태 확인 실패: {type(e).__name__}"
+        ) from e
 # 공연 색인
 @app.post(
     "/index/concert",
