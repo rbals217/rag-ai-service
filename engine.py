@@ -153,7 +153,7 @@ def bigrams(text: str) -> set[str]:
 
 _STOP = [
     "하나요", "인가요", "있나요", "되나요", "할까요",
-    "어때", "알려줘", "알려 줘", "궁금해",
+    "어때", "알려줘", "알려 줘", "궁금해","악기","커플",""
     "뭐야", "언제", "어디", "어떻게", "무엇", "?", "？"
 ]
 
@@ -166,7 +166,7 @@ ANSWER_PROMPT = ChatPromptTemplate.from_messages([
         "- 공연 정보에 없는 내용은 추측하지 않는다.\n"
         "- 찾을 수 없는 정보는 '해당 공연 정보에서 찾을 수 없습니다'라고 답한다.\n"
         "- 근거로 사용한 문장 끝에는 [#공연ID:번호]를 붙인다.\n"
-        "- 3문장 이내로 답한다."
+
     ),
     (
         "human",
@@ -417,7 +417,7 @@ class AtlasEngine:
         # ChatOpenAI 모델 생성
         llm = ChatOpenAI(
             model=settings.openai_chat_model,
-            temperature=0,
+            temperature=0.6,
             api_key=settings.openai_api_key
         )
 
@@ -529,6 +529,10 @@ class AtlasEngine:
         print("Atlas 검색 결과 개수:", len(documents))
 
         allowed = set(concert_ids)
+
+        print("검색 허용 공연 ID:", concert_ids)
+        print("검색 후 허용 ID:", allowed)
+
         scored = []
 
         for document, score in documents:

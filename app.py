@@ -79,7 +79,34 @@ def verify_token(
 @app.get("/health")
 def health(request : Request):
     return {"status": "OK","engine":request.app.state.engine.name}
+@app.post(
+    "/index/vector",
+    dependencies=[Depends(verify_token)]
+)
+async def create_vector_index(request: Request):
 
+    engine = request.app.state.engine
+
+    if not hasattr(engine, "create_vector_index"):
+        raise HTTPException(
+            status_code=400,
+            detail="Atlas 엔진에서만 사용할 수 있습니다."
+        )
+
+    try:
+        result = await run_in_threadpool(
+            engine.create_vector_index
+        )
+
+        return result
+
+    except Exception as e:
+        log.exception("Vector Search 인덱스 생성 실패")
+
+        raise HTTPException(
+            status_code=500,
+            detail=f"인덱스 생성 실패: {type(e).__name__}"
+        ) from e
 # Vector Search 인덱스 상태 확인
 @app.get(
     "/index/vector/status",
