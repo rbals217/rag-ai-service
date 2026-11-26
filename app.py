@@ -77,8 +77,8 @@ def verify_token(
 
 # 서버 상태 확인
 @app.get("/health")
-def health():
-    return {"status": "OK"}
+def health(request : Request):
+    return {"status": "OK","engine":request.app.state.engine.name}
 
 # Vector Search 인덱스 상태 확인
 @app.get(
