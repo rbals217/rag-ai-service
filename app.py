@@ -147,6 +147,11 @@ async def index_concert(req: ConcertIndexRequest, request: Request):
     engine = request.app.state.engine
 
     try:
+        log.info(
+            "[RAG 수신 데이터] ID=%s, 제목=%s",
+            req.concert_id,
+            req.title
+        )
         n = await run_in_threadpool(
             engine.index_concert,
             req.concert_id,

@@ -496,12 +496,37 @@ class AtlasEngine:
             texts=texts,
             metadatas=metadatas
         )
-
         # 새 청크 저장이 성공한 다음 기존 청크를 삭제한다.
-        self.collection.delete_many({
+        delete_result = self.collection.delete_many({
             "concert_id": concert_id,
             "_index_version": {"$ne": index_version}
         })
+
+        print(
+            f"[RAG 기존 청크 삭제] 공연 ID={concert_id}, "
+            f"삭제 개수={delete_result.deleted_count}"
+        )
+
+        # 현재 MongoDB에 남아 있는 해당 공연의 청크 확인
+        stored_docs = list(
+            self.collection.find(
+                {"concert_id": concert_id},
+                {
+                    "title": 1,
+                    "field_name": 1,
+                    "_index_version": 1
+                }
+            ).limit(20)
+        )
+
+        for doc in stored_docs:
+            print(
+                "[RAG MongoDB 저장 확인]",
+                "ID:", doc.get("concert_id"),
+                "| 제목:", doc.get("title"),
+                "| 항목:", doc.get("field_name"),
+                "| 버전:", doc.get("_index_version")
+            )
 
         return len(texts)
 
